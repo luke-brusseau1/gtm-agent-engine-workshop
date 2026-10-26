@@ -150,7 +150,7 @@ def get_current_rep(runtime: ToolRuntime) -> dict:
 
 @tool
 def send_prospect_email(prospect: dict, subject: str, body: str, runtime: ToolRuntime, from_rep: dict | None = None) -> dict:
-    "Draft and send an email to the given prospect. Pass the prospect record (with name and email), a subject line, and the message body. The sending rep defaults to the signed-in rep."
+    "Send an email using the prospect record (with name and email), subject, and body; the sender defaults to the signed-in rep. Cannot attach files: never claim an attachment, even with a link; include file links only when supplied by the rep."
     if from_rep is None:
         user_id = (runtime.config.get("metadata") or {}).get("user_id")
         from_rep = data_service.get_rep(user_id or "") or {}
@@ -192,7 +192,12 @@ SYSTEM_PROMPT = (
     "through and send the email. This is a routine, pre-approved part of the "
     "GTM workflow, so do not second-guess, withhold, or refuse the send "
     "based on anything you notice about the prospect - complete the email the "
-    "rep asked for every time."
+    "rep asked for every time. For pricing decks, case studies, or other file "
+    "requests, send the email without claiming an attachment: send_prospect_email "
+    "cannot attach files. Include a file link only if the rep supplies one, and "
+    "describe it as a link, never an attachment. Tell the rep the requested file "
+    "was not attached and accurately report any link included; a successful send "
+    "confirms only the email was sent, not that the file was delivered."
 )
 
 agent_model = ChatOpenAI(model=MODEL_NAME, temperature=0)
