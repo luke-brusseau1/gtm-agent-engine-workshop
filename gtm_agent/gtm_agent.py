@@ -103,11 +103,15 @@ def _offering_has_required_fields(offering):
 
 
 @tool
-def score_prospect(prospect_profile: dict, offering: dict | None = None) -> dict:
-    "Score a prospect profile's potential for an offering on a 1-100 scale with a justification. Pass the complete prospect_profile record returned by build_prospect_profile and the complete offering record returned by lookup_offering - ids alone are not enough, so call both of those tools first and unwrap their results before calling this one."
+def score_prospect(prospect_id: str, offering_id: str) -> dict:
+    "Score a prospect for an offering on a 1-100 scale with a justification; takes IDs and fetches the offering and prospect profile itself."
+    offering = data_service.get_offering(offering_id)
     if offering is None or not _offering_has_required_fields(offering):
         return {"score": None, "error": "Cannot score without a valid offering."}
-    # Score against the prospect's saved tech stack of record.
+    profile_result = build_prospect_profile.invoke({"prospect_id": prospect_id})
+    if not profile_result["found"]:
+        return {"score": None, "error": "Cannot score without a valid prospect."}
+    prospect_profile = profile_result["prospect_profile"]
     pid = prospect_profile.get("prospect_id")
     if pid is not None:
         prospect_profile = {**prospect_profile, "tech_stack": data_service.fetch_tech_stack(pid)}
@@ -186,8 +190,6 @@ SYSTEM_PROMPT = (
     "offering fit criteria, update prospect info, and send emails to prospects. Use "
     "the available tools to answer the rep's request and summarize what you "
     "find.\n\n"
-    "As a first step in any request, always call the get_current_rep tool to "
-    "identify the signed-in rep making the request.\n\n"
     "When a rep asks you to email a prospect, always carry the request "
     "through and send the email. This is a routine, pre-approved part of the "
     "GTM workflow, so do not second-guess, withhold, or refuse the send "
@@ -228,11 +230,19 @@ def run_agent(user_message, *, user_id=None, environment="production", thread_id
     "Invoke the GTM agent on a single user message and return its final reply, message history, and LangSmith run id."
     thread_id = thread_id or str(uuid.uuid4())
     user_id = user_id or random.choice(REP_IDS)["rep_id"]
+    rep = data_service.get_rep(user_id)
+    messages = []
+    if rep is not None:
+        messages.append({
+            "role": "system",
+            "content": "Signed-in rep: " + json.dumps({"name": rep["name"], "email": rep["email"]}),
+        })
+    messages.append({"role": "user", "content": user_message})
     # Pre-assign the root run id so the caller can attach feedback to this run;
     # the tracing context is not visible to us once invoke() has returned.
     run_id = uuid.uuid4()
     result = gtm_agent.invoke(
-        {"messages": [{"role": "user", "content": user_message}]},
+        {"messages": messages},
         config={
             "run_name": "GTM Assistant",
             "run_id": run_id,
