@@ -67,14 +67,15 @@ def build_prospect_profile(prospect_id: str) -> dict:
     return {"prospect_profile": built, "found": True}
 
 
+SCORING_WEIGHTS = {"revenue_fit": 0.5, "tech_stack_match": 0.5}
+
 SCORING_PROMPT = (
-    "You are a GTM assistant. Score the prospect's potential for the offering from "
-    "1 to 100 based on how good a fit they are, weighing their annual revenue and "
-    "tech stack. In your justification, explicitly list which of the offering's required "
-    "technologies the prospect has and which required technologies they are missing, naming "
-    "each one. Any missing required technology must lower the tech_stack_match component and "
-    "the overall score. Return a score and a justification that reflects your "
-    "overall assessment of this prospect's potential."
+    "You are a GTM assistant. Justify the supplied computed score and rubric components. "
+    "Use those values unchanged. Explicitly name the required technologies present and "
+    "missing from the prospect's stack. Revenue and technology fit each carry 50% of "
+    "the score; segment is not scored. No required technologies means full technology "
+    "fit; a zero minimum revenue means full revenue fit, and unknown revenue means "
+    "zero revenue fit when a positive minimum is required."
 )
 
 from typing import Literal
@@ -82,7 +83,6 @@ from typing import Literal
 class RubricBreakdown(BaseModel):
     revenue_fit: float
     tech_stack_match: float
-    segment_fit: float
     component_max: Literal[100] = 100
 
 
@@ -97,29 +97,50 @@ _scoring_llm = ChatOpenAI(model=MODEL_NAME, temperature=0).with_structured_outpu
 
 
 def _offering_has_required_fields(offering):
-    "Return True if the offering has the fields needed to score against it."
-    return bool(offering) and bool(offering.get("required_tech_stack")) and \
+    "Require a technology list, revenue minimum, and description; missing minima cannot be scored."
+    return bool(offering) and offering.get("required_tech_stack") is not None and \
         offering.get("min_annual_revenue") is not None and bool(offering.get("description"))
 
 
 @tool
 def score_prospect(prospect_profile: dict, offering: dict | None = None) -> dict:
-    "Score a prospect profile's potential for an offering on a 1-100 scale with a justification. Pass the complete prospect_profile record returned by build_prospect_profile and the complete offering record returned by lookup_offering - ids alone are not enough, so call both of those tools first and unwrap their results before calling this one."
+    "Score a prospect profile's potential for an offering on a 0-100 scale with a justification. Pass the complete prospect_profile record returned by build_prospect_profile and the complete offering record returned by lookup_offering - ids alone are not enough, so call both of those tools first and unwrap their results before calling this one."
     if offering is None or not _offering_has_required_fields(offering):
         return {"score": None, "error": "Cannot score without a valid offering."}
     # Score against the prospect's saved tech stack of record.
     pid = prospect_profile.get("prospect_id")
     if pid is not None:
         prospect_profile = {**prospect_profile, "tech_stack": data_service.fetch_tech_stack(pid)}
+    required = set(offering["required_tech_stack"])
+    have = required.intersection(prospect_profile.get("tech_stack", []))
+    missing = sorted(required - have)
+    tech_stack_match = round(100 * len(have) / len(required), 1) if required else 100.0
+    minimum = offering["min_annual_revenue"]
+    revenue = prospect_profile.get("annual_revenue") or 0
+    revenue_fit = 100.0 if minimum <= 0 else round(min(100, max(0, 100 * revenue / minimum)), 1)
+    rubric = RubricBreakdown(revenue_fit=revenue_fit, tech_stack_match=tech_stack_match)
+    score = round(sum(getattr(rubric, key) * weight for key, weight in SCORING_WEIGHTS.items()), 1)
+    computed = {
+        "score": score,
+        "rubric_breakdown": rubric.model_dump(),
+        "present_technologies": sorted(have),
+        "missing_technologies": missing,
+    }
     user = (
         "Offering:\n" + json.dumps(offering, indent=2) +
-        "\n\nProspect profile:\n" + json.dumps(prospect_profile, indent=2)
+        "\n\nProspect profile:\n" + json.dumps(prospect_profile, indent=2) +
+        "\n\nComputed scoring:\n" + json.dumps(computed, indent=2)
     )
     result = _scoring_llm.invoke([
         {"role": "system", "content": SCORING_PROMPT},
         {"role": "user", "content": user},
     ])
-    return result.model_dump()
+    return {
+        **result.model_dump(),
+        "score": score,
+        "max_score": 100,
+        "rubric_breakdown": rubric.model_dump(),
+    }
 
 
 @tool
