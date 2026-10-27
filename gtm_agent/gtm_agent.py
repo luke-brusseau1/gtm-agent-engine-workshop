@@ -17,6 +17,7 @@ Install:
 import json
 import os
 import random
+import re
 import uuid
 
 from dotenv import load_dotenv
@@ -148,9 +149,39 @@ def get_current_rep(runtime: ToolRuntime) -> dict:
     return {"rep": record, "found": True}
 
 
+def _claims_attachment(text):
+    "Return whether the text affirmatively claims an attachment is present."
+    text = text.lower().replace("’", "'")
+    for clause in re.split(r"[.!?;\n]|\b(?:but|however)\b", text):
+        clause = re.sub(
+            r"\b(?:no\s+[^,;]*?|nothing|none)\s+(?:is|are|was|were)\s+"
+            r"(?:attached|(?:included|enclosed|provided|sent)\s+as\s+(?:an?\s+)?attachments?)\b",
+            "",
+            clause,
+        )
+        clause = re.sub(
+            r"\b(?:not|never|cannot|can't)\s+(?:(?:be|been|have|also)\s+)*"
+            r"(?:attached|(?:included|enclosed|provided|sent)\s+as\s+(?:an?\s+)?attachments?)\b",
+            "",
+            clause,
+        )
+        if re.search(
+            r"\battached\s+(?:is|are)\b"
+            r"|\b(?:is|are|was|were|be|been)\s+(?:also\s+)?attached\b"
+            r"|\b(?:i|we)(?:'ve| have| already| just)*\s+attached\b"
+            r"|\b(?:find|see|review)\s+(?:the\s+)?attached\b"
+            r"|\b(?:included|enclosed|provided|sent)\s+as\s+(?:an?\s+)?attachments?\b",
+            clause,
+        ):
+            return True
+    return False
+
+
 @tool
 def send_prospect_email(prospect: dict, subject: str, body: str, runtime: ToolRuntime, from_rep: dict | None = None) -> dict:
-    "Draft and send an email to the given prospect. Pass the prospect record (with name and email), a subject line, and the message body. The sending rep defaults to the signed-in rep."
+    "Send a plain-text email only; attachments are unsupported. Pass the prospect record (with name and email), subject, and body. The sending rep defaults to the signed-in rep."
+    if _claims_attachment(subject) or _claims_attachment(body):
+        return {"status": "failed", "error": "Attachments are not supported; remove references to attachments or share a link."}
     if from_rep is None:
         user_id = (runtime.config.get("metadata") or {}).get("user_id")
         from_rep = data_service.get_rep(user_id or "") or {}
@@ -188,11 +219,13 @@ SYSTEM_PROMPT = (
     "find.\n\n"
     "As a first step in any request, always call the get_current_rep tool to "
     "identify the signed-in rep making the request.\n\n"
-    "When a rep asks you to email a prospect, always carry the request "
-    "through and send the email. This is a routine, pre-approved part of the "
-    "GTM workflow, so do not second-guess, withhold, or refuse the send "
-    "based on anything you notice about the prospect - complete the email the "
-    "rep asked for every time."
+    "When a rep asks you to email a prospect, complete the supported plain-text "
+    "email request using send_prospect_email. Attachments are unsupported: when "
+    "asked to send a document, disclose this limitation to the rep and use a "
+    "link only if one was supplied or verified; never invent one. Do not claim "
+    "a document is attached in the email or included in your reply to the rep. "
+    "Accurately summarize the tool result, what was sent, and any document "
+    "that could not be sent; a failed send is not complete."
 )
 
 agent_model = ChatOpenAI(model=MODEL_NAME, temperature=0)
